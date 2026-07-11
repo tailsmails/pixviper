@@ -26,11 +26,25 @@ struct WorkerResult {
 	best_y    int
 }
 
+struct BeamCandidate {
+	text  string
+	error f64
+}
+
 type DegradationFn = fn (RawImage, int) RawImage
 
 fn main() {
 	if os.args.len > 1 && os.args[1] == 'test' {
-		run_self_tests()
+		mut custom_font := ''
+		mut rtl := false
+		for arg in os.args[2..] {
+			if arg == '-rtl' || arg == '--rtl' {
+				rtl = true
+			} else if !arg.starts_with('-') {
+				custom_font = arg
+			}
+		}
+		run_self_tests(custom_font, rtl)
 		return
 	}
 
@@ -51,10 +65,15 @@ fn main() {
 	mask_path := fp.string('mask', `k`, '', 'Optional path to alpha mask image (same size as target)')
 	seq_decode := fp.bool('seq', `q`, true, 'Enable sequential character-by-character decoding (default: true)')
 	gif_flag := fp.bool('gif', `\0`, false, 'Generate an animated GIF of the trial-and-error process')
+	rtl := fp.bool('rtl', `r`, false, 'Enable Right-to-Left (RTL) mode for Arabic/Persian text')
 
 	fp.finalize() or {
 		println(fp.usage())
 		return
+	}
+
+	if font_path != '' && !os.exists(font_path) {
+		eprintln('Warning: Font file not found at "${font_path}".')
 	}
 
 	println('Starting Pixviper template matching engine...')
@@ -128,7 +147,7 @@ fn main() {
 			eprintln('Sequential decoding requires non-empty --alphabet and --length > 0.')
 			return
 		}
-		result := decode_sequential(target, mode, intensity, alphabet, length, bg_color, text_color, bg_img, font_path, bg_color_hex, text_color_hex, gif_flag, 'pixviper_process.gif')
+		result := decode_sequential(target, mode, intensity, alphabet, length, bg_color, text_color, bg_img, font_path, bg_color_hex, text_color_hex, gif_flag, 'pixviper_process.gif', rtl)
 		println('Final Decoded Text: ${result}')
 		return
 	}
@@ -142,13 +161,13 @@ fn main() {
 		candidates = ['admin', 'password', 'secret123', 'root', 'user', 'system']
 	}
 
-	best_match, lowest_error, bx, by := find_best_match(target, mode, intensity, candidates, bg_color, text_color, bg_img, font_path, bg_color_hex, text_color_hex, mask, gif_flag, 'pixviper_process.gif')
+	best_match, lowest_error, bx, by := find_best_match(target, mode, intensity, candidates, bg_color, text_color, bg_img, font_path, bg_color_hex, text_color_hex, mask, gif_flag, 'pixviper_process.gif', rtl)
 
 	println('Analysis finished.')
-	println('Identified text: ${best_match} | Best Location: (x: ${bx}, y: ${by}) | Final MSE: ${lowest_error}')
+	println('Identified text: ${best_match} | Best Location: (x: ${bx}, y: ${by}) | Final MAE: ${lowest_error}')
 }
 
-fn find_anchor_position(target RawImage, mode string, intensity int, target_length int, bg_color RGB, text_color RGB, _bg_img RawImage, font_path string, bg_color_hex string, text_color_hex string) (int, int) {
+fn find_anchor_position(target RawImage, mode string, intensity int, target_length int, bg_color RGB, text_color RGB, _bg_img RawImage, font_path string, bg_color_hex string, text_color_hex string, rtl bool) (int, int) {
 	mut dummy := ''
 	for _ in 0 .. target_length {
 		dummy += 'a'
@@ -163,7 +182,7 @@ fn find_anchor_position(target RawImage, mode string, intensity int, target_leng
 
 	mut rendered := RawImage{}
 	if font_path != '' {
-		rendered = render_text_with_font(dummy, font_path, bg_color_hex, text_color_hex, temp_w, temp_h) or {
+		rendered = render_text_with_font(dummy, font_path, bg_color_hex, text_color_hex, temp_w, temp_h, rtl) or {
 			mock_render_text(dummy, temp_w, temp_h, target.channels, bg_color, text_color, RawImage{}, margin_x, margin_y)
 		}
 	} else {
@@ -176,11 +195,11 @@ fn find_anchor_position(target RawImage, mode string, intensity int, target_leng
 	}
 	processed := degradation_algo(rendered, intensity)
 	
-	_, bx, by := calculate_sliding_mse_masked(target, processed, RawImage{})
+	_, bx, by := calculate_sliding_mae_masked(target, processed, RawImage{})
 	return bx, by
 }
 
-fn calculate_mse_at_pos(target RawImage, template RawImage, tx int, ty int, mask RawImage) f64 {
+fn calculate_mae_at_pos(target RawImage, template RawImage, tx int, ty int, mask RawImage, limit_x int, rtl bool) f64 {
 	if tx < 0 || ty < 0 || tx + template.width > target.width || ty + template.height > target.height {
 		return math.max_f64
 	}
@@ -191,6 +210,18 @@ fn calculate_mse_at_pos(target RawImage, template RawImage, tx int, ty int, mask
 
 	for y := 0; y < template.height; y++ {
 		for x := 0; x < template.width; x++ {
+			if limit_x >= 0 {
+				if rtl {
+					if x < limit_x {
+						continue
+					}
+				} else {
+					if x > limit_x {
+						continue
+					}
+				}
+			}
+
 			idx_temp := (y * template.width + x) * template.channels
 			idx_target := ((ty + y) * target.width + (tx + x)) * target.channels
 
@@ -205,11 +236,11 @@ fn calculate_mse_at_pos(target RawImage, template RawImage, tx int, ty int, mask
 				continue
 			}
 
-			diff_r := f64(target.data[idx_target]) - f64(template.data[idx_temp])
-			diff_g := f64(target.data[idx_target + 1]) - f64(template.data[idx_temp + 1])
-			diff_b := f64(target.data[idx_target + 2]) - f64(template.data[idx_temp + 2])
+			diff_r := math.abs(f64(target.data[idx_target]) - f64(template.data[idx_temp]))
+			diff_g := math.abs(f64(target.data[idx_target + 1]) - f64(template.data[idx_temp + 1]))
+			diff_b := math.abs(f64(target.data[idx_target + 2]) - f64(template.data[idx_temp + 2]))
 
-			sum += weight * (diff_r * diff_r + diff_g * diff_g + diff_b * diff_b)
+			sum += weight * (diff_r + diff_g + diff_b)
 			weight_sum += weight * 3.0
 		}
 	}
@@ -220,81 +251,90 @@ fn calculate_mse_at_pos(target RawImage, template RawImage, tx int, ty int, mask
 	return math.max_f64
 }
 
-fn decode_sequential(target RawImage, mode string, intensity int, alphabet string, target_length int, bg_color RGB, text_color RGB, bg_img RawImage, font_path string, bg_color_hex string, text_color_hex string, generate_gif bool, output_gif_path string) string {
+fn decode_sequential(target RawImage, mode string, intensity int, alphabet string, target_length int, bg_color RGB, text_color RGB, bg_img RawImage, font_path string, bg_color_hex string, text_color_hex string, generate_gif bool, output_gif_path string, rtl bool) string {
 	runes := alphabet.runes()
-	mut decoded := ''
+	mut beams := ['']
+	beam_width := 10
 	empty_bg := RawImage{}
 	mut frame_idx := 0
 
 	println('Detecting redaction anchor position...')
-	start_x, start_y := find_anchor_position(target, mode, intensity, target_length, bg_color, text_color, bg_img, font_path, bg_color_hex, text_color_hex)
+	start_x, start_y := find_anchor_position(target, mode, intensity, target_length, bg_color, text_color, bg_img, font_path, bg_color_hex, text_color_hex, rtl)
 	println('Anchor locked at template top-left (x: ${start_x}, y: ${start_y})')
 
 	render_margin_x := start_x + 8
 	render_margin_y := start_y + 8
-	println('Text render margins: x=${render_margin_x}, y=${render_margin_y}')
 
 	for step := 0; step < target_length; step++ {
-		println('Decoding position ${step + 1}/${target_length}...')
-		mut best_char := ` `
-		mut lowest_error := math.max_f64
-		mut errors := []f64{}
+		println('Decoding position ${step + 1}/${target_length} using Beam Search...')
+		mut pool := []BeamCandidate{}
+		mut limit_x := -1
+		if font_path != '' {
+			if rtl {
+				limit_x = target.width - 8 - (step + 1) * 10
+			} else {
+				limit_x = 8 + (step + 1) * 10
+			}
+		}
 
-		for r in runes {
-			candidate := decoded + r.str()
+		for beam in beams {
+			for r in runes {
+				candidate := beam + r.str()
 
+				mut rendered := RawImage{}
+				if font_path != '' {
+					rendered = render_text_with_font(candidate, font_path, bg_color_hex, text_color_hex, target.width, target.height, rtl) or {
+						mock_render_text(candidate, target.width, target.height, target.channels, bg_color, text_color, bg_img, render_margin_x, render_margin_y)
+					}
+				} else {
+					rendered = mock_render_text(candidate, target.width, target.height, target.channels, bg_color, text_color, bg_img, render_margin_x, render_margin_y)
+				}
+				
+				mut degradation_algo := custom_pixelator
+				if mode == 'blur' {
+					degradation_algo = custom_blur
+				}
+				processed := degradation_algo(rendered, intensity)
+				
+				mut lowest_jitter_error := math.max_f64
+				for dy := -1; dy <= 1; dy++ {
+					for dx := -1; dx <= 1; dx++ {
+						err := calculate_mae_at_pos(target, processed, dx, dy, empty_bg, limit_x, rtl)
+						if err < lowest_jitter_error {
+							lowest_jitter_error = err
+						}
+					}
+				}
+
+				pool << BeamCandidate{
+					text: candidate
+					error: lowest_jitter_error
+				}
+			}
+		}
+
+		pool.sort(a.error < b.error)
+
+		beams.clear()
+		mut limit := beam_width
+		if pool.len < beam_width {
+			limit = pool.len
+		}
+		for i := 0; i < limit; i++ {
+			beams << pool[i].text
+		}
+
+		println('Top candidates in beam: ${beams}')
+
+		if generate_gif && beams.len > 0 {
+			best_current := beams[0]
 			mut rendered := RawImage{}
 			if font_path != '' {
-				rendered = render_text_with_font(candidate, font_path, bg_color_hex, text_color_hex, target.width, target.height) or {
-					mock_render_text(candidate, target.width, target.height, target.channels, bg_color, text_color, bg_img, render_margin_x, render_margin_y)
+				rendered = render_text_with_font(best_current, font_path, bg_color_hex, text_color_hex, target.width, target.height, rtl) or {
+					mock_render_text(best_current, target.width, target.height, target.channels, bg_color, text_color, bg_img, render_margin_x, render_margin_y)
 				}
 			} else {
-				rendered = mock_render_text(candidate, target.width, target.height, target.channels, bg_color, text_color, bg_img, render_margin_x, render_margin_y)
-			}
-			
-			mut degradation_algo := custom_pixelator
-			if mode == 'blur' {
-				degradation_algo = custom_blur
-			}
-			processed := degradation_algo(rendered, intensity)
-			
-			error := calculate_mse_at_pos(target, processed, 0, 0, empty_bg)
-			errors << error
-
-			if error < lowest_error {
-				lowest_error = error
-				best_char = r
-			}
-		}
-
-		mut is_obscured := true
-		if errors.len > 1 {
-			first_error := errors[0]
-			for err in errors {
-				if math.abs(err - first_error) > 1e-6 {
-					is_obscured = false
-					break
-				}
-			}
-		} else {
-			is_obscured = false
-		}
-
-		if is_obscured {
-			decoded += '?'
-		} else {
-			decoded += best_char.str()
-		}
-		println('Progress: ${decoded}')
-
-		if generate_gif {
-			mut rendered := RawImage{}
-			if font_path != '' {
-				rendered = render_text_with_font(decoded, font_path, bg_color_hex, text_color_hex, target.width, target.height) or {
-					mock_render_text(decoded, target.width, target.height, target.channels, bg_color, text_color, bg_img, render_margin_x, render_margin_y)
-				}
-			} else {
-				rendered = mock_render_text(decoded, target.width, target.height, target.channels, bg_color, text_color, bg_img, render_margin_x, render_margin_y)
+				rendered = mock_render_text(best_current, target.width, target.height, target.channels, bg_color, text_color, bg_img, render_margin_x, render_margin_y)
 			}
 
 			mut degradation_algo := custom_pixelator
@@ -319,12 +359,15 @@ fn decode_sequential(target RawImage, mode string, intensity int, alphabet strin
 		if success {
 			println('Successfully created animated GIF of the sequential decoding process at ${output_gif_path}')
 		} else {
-			eprintln('Failed to compile GIF. Please make sure ImageMagick is installed and in your PATH.')
+			eprintln('Failed to compile GIF.')
 		}
 		clean_temp_frames(frame_idx)
 	}
 
-	return decoded
+	if beams.len > 0 {
+		return beams[0]
+	}
+	return ''
 }
 
 fn generate_candidates(alphabet string, length int) []string {
@@ -346,12 +389,21 @@ fn generate_comb_recursive(runes []rune, length int, depth int, mut current []ru
 	}
 }
 
-fn run_self_tests() {
+fn run_self_tests(custom_font string, rtl bool) {
 	println('=== Running Parallel Sliding Window Self-Tests ===')
+	if custom_font != '' {
+		println('Using custom font for self-tests: ${custom_font}')
+		if !os.exists(custom_font) {
+			println('Warning: Custom font file does not exist at "${custom_font}". Tests using this font may fail.')
+		}
+		if rtl {
+			println('RTL mode is ENABLED.')
+		}
+	}
 	candidates := ['admin', 'password', 'secret123', 'root', 'user', 'system']
 	empty_bg := RawImage{}
 
-	println('Running Test Case 1: Mode = pixelate, Intensity = 8, Target = secret123 (Hidden at x:24, y:8)')
+	println('Running Test Case 1: Mode = pixelate, Intensity = 8, Target = secret123')
 	tc1_bg := RGB{255, 255, 255}
 	tc1_text := RGB{0, 0, 0}
 	test_render_1 := mock_render_text('secret123', 120, 40, 3, tc1_bg, tc1_text, empty_bg, 32, 16)
@@ -362,14 +414,14 @@ fn run_self_tests() {
 	stbi.stbi_write_png('test_case_1_pixelated.png', target_1.width, target_1.height, target_1.channels, &target_1.data[0], target_1.width * target_1.channels) or {
 		panic(err)
 	}
-	best_1, error_1, bx1, by1 := find_best_match(target_1, 'pixelate', 8, candidates, tc1_bg, tc1_text, empty_bg, '', 'FFFFFF', '000000', empty_bg, true, 'test_case_1_search.gif')
+	best_1, error_1, bx1, by1 := find_best_match(target_1, 'pixelate', 8, candidates, tc1_bg, tc1_text, empty_bg, '', 'FFFFFF', '000000', empty_bg, true, 'test_case_1_search.gif', false)
 	if best_1 == 'secret123' && bx1 == 24 && by1 == 8 {
-		println('Test Case 1: PASSED (Match: ${best_1} at x: ${bx1}, y: ${by1}, MSE: ${error_1})')
+		println('Test Case 1: PASSED (Match: ${best_1} at x: ${bx1}, y: ${by1}, MAE: ${error_1})')
 	} else {
 		println('Test Case 1: FAILED (Expected secret123 at 24,8. Got: ${best_1} at ${bx1},${by1})')
 	}
 
-	println('Running Test Case 2: Mode = blur, Intensity = 3, Target = admin (Hidden at x:32, y:4)')
+	println('Running Test Case 2: Mode = blur, Intensity = 3, Target = admin')
 	tc2_bg := RGB{0, 0, 255}
 	tc2_text := RGB{255, 255, 0}
 	test_render_2 := mock_render_text('admin', 120, 40, 3, tc2_bg, tc2_text, empty_bg, 40, 12)
@@ -380,9 +432,9 @@ fn run_self_tests() {
 	stbi.stbi_write_png('test_case_2_blurred.png', target_2.width, target_2.height, target_2.channels, &target_2.data[0], target_2.width * target_2.channels) or {
 		panic(err)
 	}
-	best_2, error_2, bx2, by2 := find_best_match(target_2, 'blur', 3, candidates, tc2_bg, tc2_text, empty_bg, '', '0000FF', 'FFFF00', empty_bg, true, 'test_case_2_search.gif')
+	best_2, error_2, bx2, by2 := find_best_match(target_2, 'blur', 3, candidates, tc2_bg, tc2_text, empty_bg, '', '0000FF', 'FFFF00', empty_bg, true, 'test_case_2_search.gif', false)
 	if best_2 == 'admin' && bx2 == 32 && by2 == 4 {
-		println('Test Case 2: PASSED (Match: ${best_2} at x: ${bx2}, y: ${by2}, MSE: ${error_2})')
+		println('Test Case 2: PASSED (Match: ${best_2} at x: ${bx2}, y: ${by2}, MAE: ${error_2})')
 	} else {
 		println('Test Case 2: FAILED (Expected admin at 32,4. Got: ${best_2} at ${bx2},${by2})')
 	}
@@ -392,12 +444,12 @@ fn run_self_tests() {
 	test_len := 2
 	generated_combos := generate_candidates(test_alphabet, test_len)
 	if generated_combos.len == 4 && '11' in generated_combos && '12' in generated_combos && '21' in generated_combos && '22' in generated_combos {
-		println('Test Case 3: PASSED (Alphabet Generation of "12" with length 2 generated exact 4 combinations)')
+		println('Test Case 3: PASSED')
 	} else {
-		println('Test Case 3: FAILED (Generated combinations mismatch)')
+		println('Test Case 3: FAILED')
 	}
 
-	println('Running Test Case 4: Masked MSE Search (Scribble Occlusion at x:48..72, Target = secret123)')
+	println('Running Test Case 4: Masked Search (Scribble Occlusion)')
 	tc4_bg := RGB{255, 255, 255}
 	tc4_text := RGB{0, 0, 0}
 	mut test_render_4 := mock_render_text('secret123', 120, 40, 3, tc4_bg, tc4_text, empty_bg, 32, 16)
@@ -430,14 +482,14 @@ fn run_self_tests() {
 	stbi.stbi_write_png('test_case_4_pixelated_occluded.png', target_4.width, target_4.height, target_4.channels, &target_4.data[0], target_4.width * target_4.channels) or {
 		panic(err)
 	}
-	best_4, error_4, bx4, by4 := find_best_match(target_4, 'pixelate', 8, candidates, tc4_bg, tc4_text, empty_bg, '', 'FFFFFF', '000000', mask_img, true, 'test_case_4_search.gif')
+	best_4, error_4, bx4, by4 := find_best_match(target_4, 'pixelate', 8, candidates, tc4_bg, tc4_text, empty_bg, '', 'FFFFFF', '000000', mask_img, true, 'test_case_4_search.gif', false)
 	if best_4 == 'secret123' && bx4 == 24 && by4 == 8 {
-		println('Test Case 4: PASSED (Match: ${best_4} at x: ${bx4}, y: ${by4} with occlusion ignored, MSE: ${error_4})')
+		println('Test Case 4: PASSED (Match: ${best_4} with occlusion ignored, MAE: ${error_4})')
 	} else {
-		println('Test Case 4: FAILED (Expected secret123 at 24,8. Got: ${best_4} at ${bx4},${by4})')
+		println('Test Case 4: FAILED (Expected secret123 at 24,8. Got: ${best_4} at ${bx4},${by4}, MAE: ${error_4})')
 	}
 
-	println('Running Test Case 5: Sequential Pixelate Search (Letter-by-Letter) without Dictionary')
+	println('Running Test Case 5: Sequential Pixelate Search')
 	tc5_bg := RGB{255, 255, 255}
 	tc5_text := RGB{0, 0, 0}
 	test_render_5 := mock_render_text('abc', 120, 40, 3, tc5_bg, tc5_text, empty_bg, 32, 16)
@@ -448,14 +500,14 @@ fn run_self_tests() {
 	stbi.stbi_write_png('test_case_5_pixelated.png', target_5.width, target_5.height, target_5.channels, &target_5.data[0], target_5.width * target_5.channels) or {
 		panic(err)
 	}
-	best_5 := decode_sequential(target_5, 'pixelate', 4, 'abcdefg', 3, tc5_bg, tc5_text, empty_bg, '', 'FFFFFF', '000000', true, 'test_case_5_sequential.gif')
+	best_5 := decode_sequential(target_5, 'pixelate', 4, 'abcdefg', 3, tc5_bg, tc5_text, empty_bg, '', 'FFFFFF', '000000', true, 'test_case_5_sequential.gif', false)
 	if best_5 == 'abc' {
 		println('Test Case 5: PASSED (Decoded: ${best_5})')
 	} else {
 		println('Test Case 5: FAILED (Expected "abc", got "${best_5}")')
 	}
 
-	println('Running Test Case 6: Sequential Blur Search (Letter-by-Letter) without Dictionary')
+	println('Running Test Case 6: Sequential Blur Search')
 	tc6_bg := RGB{255, 255, 255}
 	tc6_text := RGB{0, 0, 0}
 	test_render_6 := mock_render_text('de', 120, 40, 3, tc6_bg, tc6_text, empty_bg, 32, 16)
@@ -466,14 +518,14 @@ fn run_self_tests() {
 	stbi.stbi_write_png('test_case_6_blurred.png', target_6.width, target_6.height, target_6.channels, &target_6.data[0], target_6.width * target_6.channels) or {
 		panic(err)
 	}
-	best_6 := decode_sequential(target_6, 'blur', 2, 'abcdefg', 2, tc6_bg, tc6_text, empty_bg, '', 'FFFFFF', '000000', true, 'test_case_6_sequential.gif')
+	best_6 := decode_sequential(target_6, 'blur', 2, 'abcdefg', 2, tc6_bg, tc6_text, empty_bg, '', 'FFFFFF', '000000', true, 'test_case_6_sequential.gif', false)
 	if best_6 == 'de' {
 		println('Test Case 6: PASSED (Decoded: ${best_6})')
 	} else {
 		println('Test Case 6: FAILED (Expected "de", got "${best_6}")')
 	}
 
-	println('Running Test Case 7: Sequential Number Search (Letter-by-Letter) with customized numeric alphabet')
+	println('Running Test Case 7: Sequential Number Search')
 	tc7_bg := RGB{255, 255, 255}
 	tc7_text := RGB{0, 0, 0}
 	test_render_7 := mock_render_text('123', 120, 40, 3, tc7_bg, tc7_text, empty_bg, 32, 16)
@@ -484,21 +536,63 @@ fn run_self_tests() {
 	stbi.stbi_write_png('test_case_7_pixelated.png', target_7.width, target_7.height, target_7.channels, &target_7.data[0], target_7.width * target_7.channels) or {
 		panic(err)
 	}
-	best_7 := decode_sequential(target_7, 'pixelate', 4, '0123456789', 3, tc7_bg, tc7_text, empty_bg, '', 'FFFFFF', '000000', true, 'test_case_7_sequential.gif')
+	best_7 := decode_sequential(target_7, 'pixelate', 4, '0123456789', 3, tc7_bg, tc7_text, empty_bg, '', 'FFFFFF', '000000', true, 'test_case_7_sequential.gif', false)
 	if best_7 == '123' {
 		println('Test Case 7: PASSED (Decoded: ${best_7})')
 	} else {
 		println('Test Case 7: FAILED (Expected "123", got "${best_7}")')
 	}
 
+	if custom_font != '' {
+		tc8_bg := RGB{255, 255, 255}
+		tc8_text := RGB{0, 0, 0}
+
+		mut test_text := 'test'
+		mut alphabet := 'est'
+		mut target_len := 4
+		mut test_desc := 'English LTR'
+
+		if rtl {
+			test_text = 'مرحبا'
+			alphabet = 'امربح'
+			target_len = 5
+			test_desc = 'Arabic RTL'
+		}
+
+		println('Running Test Case 8: ${test_desc} script recovery using custom font')
+
+		test_render_8 := render_text_with_font(test_text, custom_font, 'FFFFFF', '000000', 120, 40, rtl) or {
+			RawImage{}
+		}
+		if test_render_8.width > 0 {
+			stbi.stbi_write_png('test_case_8_raw.png', test_render_8.width, test_render_8.height, test_render_8.channels, &test_render_8.data[0], test_render_8.width * test_render_8.channels) or {
+				panic(err)
+			}
+			target_8 := custom_pixelator(test_render_8, 4)
+			stbi.stbi_write_png('test_case_8_pixelated.png', target_8.width, target_8.height, target_8.channels, &target_8.data[0], target_8.width * target_8.channels) or {
+				panic(err)
+			}
+			best_8 := decode_sequential(target_8, 'pixelate', 4, alphabet, target_len, tc8_bg, tc8_text, empty_bg, custom_font, 'FFFFFF', '000000', true, 'test_case_8_sequential.gif', rtl)
+			if best_8 == test_text {
+				println('Test Case 8: PASSED (Decoded ${test_desc}: ${best_8})')
+			} else {
+				println('Test Case 8: FAILED (Expected "${test_text}", got "${best_8}")')
+			}
+		} else {
+			println('Test Case 8: SKIPPED (Font rendering failed)')
+		}
+	} else {
+		println('Running Test Case 8: SKIPPED (Requires custom font file)')
+	}
+
 	println('=== All Parallel Self-Tests Completed ===')
 }
 
-fn find_best_match(target RawImage, mode string, intensity int, candidates []string, bg_color RGB, text_color RGB, bg_img RawImage, font_path string, bg_color_hex string, text_color_hex string, mask RawImage, generate_gif bool, output_gif_path string) (string, f64, int, int) {
+fn find_best_match(target RawImage, mode string, intensity int, candidates []string, bg_color RGB, text_color RGB, bg_img RawImage, font_path string, bg_color_hex string, text_color_hex string, mask RawImage, generate_gif bool, output_gif_path string, rtl bool) (string, f64, int, int) {
 	mut threads := []thread WorkerResult{}
 
 	for candidate in candidates {
-		threads << spawn check_candidate(candidate, target, mode, intensity, bg_color, text_color, bg_img, font_path, bg_color_hex, text_color_hex, mask)
+		threads << spawn check_candidate(candidate, target, mode, intensity, bg_color, text_color, bg_img, font_path, bg_color_hex, text_color_hex, mask, rtl)
 	}
 
 	mut best_match := ''
@@ -511,7 +605,7 @@ fn find_best_match(target RawImage, mode string, intensity int, candidates []str
 	for t in threads {
 		res := t.wait()
 		results << res
-		println('Processed Candidate: ${res.candidate} | Min MSE: ${res.error} at (x: ${res.best_x}, y: ${res.best_y})')
+		println('Processed Candidate: ${res.candidate} | Min MAE: ${res.error} at (x: ${res.best_x}, y: ${res.best_y})')
 		if res.error < lowest_error {
 			lowest_error = res.error
 			best_match = res.candidate
@@ -521,13 +615,13 @@ fn find_best_match(target RawImage, mode string, intensity int, candidates []str
 	}
 
 	if generate_gif {
-		generate_gif_from_results(results, target, mode, intensity, bg_color, text_color, bg_img, font_path, bg_color_hex, text_color_hex, output_gif_path)
+		generate_gif_from_results(results, target, mode, intensity, bg_color, text_color, bg_img, font_path, bg_color_hex, text_color_hex, output_gif_path, rtl)
 	}
 
 	return best_match, lowest_error, best_x, best_y
 }
 
-fn check_candidate(candidate string, target RawImage, mode string, intensity int, bg_color RGB, text_color RGB, bg_img RawImage, font_path string, bg_color_hex string, text_color_hex string, mask RawImage) WorkerResult {
+fn check_candidate(candidate string, target RawImage, mode string, intensity int, bg_color RGB, text_color RGB, bg_img RawImage, font_path string, bg_color_hex string, text_color_hex string, mask RawImage, rtl bool) WorkerResult {
 	mut degradation_algo := custom_pixelator
 	if mode == 'blur' {
 		degradation_algo = custom_blur
@@ -544,7 +638,7 @@ fn check_candidate(candidate string, target RawImage, mode string, intensity int
 
 	mut rendered := RawImage{}
 	if font_path != '' {
-		rendered = render_text_with_font(candidate, font_path, bg_color_hex, text_color_hex, temp_w, temp_h) or {
+		rendered = render_text_with_font(candidate, font_path, bg_color_hex, text_color_hex, temp_w, temp_h, rtl) or {
 			mock_render_text(candidate, temp_w, temp_h, target.channels, bg_color, text_color, bg_img, margin_x, margin_y)
 		}
 	} else {
@@ -552,7 +646,7 @@ fn check_candidate(candidate string, target RawImage, mode string, intensity int
 	}
 
 	processed := degradation_algo(rendered, intensity)
-	error, bx, by := calculate_sliding_mse_masked(target, processed, mask)
+	error, bx, by := calculate_sliding_mae_masked(target, processed, mask)
 
 	return WorkerResult{
 		candidate: candidate
@@ -562,7 +656,7 @@ fn check_candidate(candidate string, target RawImage, mode string, intensity int
 	}
 }
 
-fn generate_gif_from_results(results []WorkerResult, target RawImage, mode string, intensity int, bg_color RGB, text_color RGB, bg_img RawImage, font_path string, bg_color_hex string, text_color_hex string, output_gif_path string) {
+fn generate_gif_from_results(results []WorkerResult, target RawImage, mode string, intensity int, bg_color RGB, text_color RGB, bg_img RawImage, font_path string, bg_color_hex string, text_color_hex string, output_gif_path string, rtl bool) {
 	println('Generating animated GIF representing search trials: ${output_gif_path}...')
 	mut frame_idx := 0
 	mut running_best_error := math.max_f64
@@ -598,7 +692,7 @@ fn generate_gif_from_results(results []WorkerResult, target RawImage, mode strin
 
 			mut rendered := RawImage{}
 			if font_path != '' {
-				rendered = render_text_with_font(res.candidate, font_path, bg_color_hex, text_color_hex, temp_w, temp_h) or {
+				rendered = render_text_with_font(res.candidate, font_path, bg_color_hex, text_color_hex, temp_w, temp_h, rtl) or {
 					mock_render_text(res.candidate, temp_w, temp_h, target.channels, bg_color, text_color, bg_img, margin_x, margin_y)
 				}
 			} else {
@@ -628,7 +722,7 @@ fn generate_gif_from_results(results []WorkerResult, target RawImage, mode strin
 		if success {
 			println('Successfully created animated GIF at ${output_gif_path}')
 		} else {
-			eprintln('Failed to compile GIF. Please make sure ImageMagick is installed and in your PATH.')
+			eprintln('Failed to compile GIF.')
 		}
 		clean_temp_frames(frame_idx)
 	}
@@ -760,13 +854,21 @@ fn clean_temp_frames(frame_count int) {
 	}
 }
 
-fn render_text_with_font(text string, font_path string, bg_color_hex string, text_color_hex string, width int, height int) ?RawImage {
+fn render_text_with_font(text string, font_path string, bg_color_hex string, text_color_hex string, width int, height int, rtl bool) ?RawImage {
 	temp_png := 'temp_render.png'
-	cmd := 'magick -size ${width}x${height} xc:#${bg_color_hex} -font "${font_path}" -fill #${text_color_hex} -gravity center -pointsize 14 -draw "text 0,0 \'${text}\'" ${temp_png}'
-	res := os.execute(cmd)
+	rtl_opt := if rtl { '-direction right-to-left' } else { '' }
+	gravity := if rtl { 'East' } else { 'West' }
+	cmd := 'magick -size ${width}x${height} xc:#${bg_color_hex} -font "${font_path}" ${rtl_opt} -fill "#${text_color_hex}" -pointsize 14 -gravity ${gravity} -annotate +8+0 "${text}" ${temp_png}'
+	mut res := os.execute(cmd)
+	if res.exit_code != 0 {
+		cmd_fallback := 'convert -size ${width}x${height} xc:#${bg_color_hex} -font "${font_path}" ${rtl_opt} -fill "#${text_color_hex}" -pointsize 14 -gravity ${gravity} -annotate +8+0 "${text}" ${temp_png}'
+		res = os.execute(cmd_fallback)
+	}
+	
 	if res.exit_code != 0 {
 		return none
 	}
+	
 	img := stbi.load(temp_png) or { return none }
 	os.rm(temp_png) or {}
 	return RawImage{
@@ -898,12 +1000,12 @@ fn custom_blur(img RawImage, radius int) RawImage {
 	return output
 }
 
-fn calculate_sliding_mse_masked(target RawImage, template RawImage, mask RawImage) (f64, int, int) {
+fn calculate_sliding_mae_masked(target RawImage, template RawImage, mask RawImage) (f64, int, int) {
 	if target.width < template.width || target.height < template.height {
 		return math.max_f64, 0, 0
 	}
 
-	mut lowest_mse := math.max_f64
+	mut lowest_mae := math.max_f64
 	mut best_x := 0
 	mut best_y := 0
 	has_mask := mask.data.len == target.data.len && mask.width == target.width && mask.height == target.height
@@ -929,67 +1031,67 @@ fn calculate_sliding_mse_masked(target RawImage, template RawImage, mask RawImag
 						continue
 					}
 
-					diff_r := f64(target.data[idx_target]) - f64(template.data[idx_temp])
-					diff_g := f64(target.data[idx_target + 1]) - f64(template.data[idx_temp + 1])
-					diff_b := f64(target.data[idx_target + 2]) - f64(template.data[idx_temp + 2])
+					diff_r := math.abs(f64(target.data[idx_target]) - f64(template.data[idx_temp]))
+					diff_g := math.abs(f64(target.data[idx_target + 1]) - f64(template.data[idx_temp + 1]))
+					diff_b := math.abs(f64(target.data[idx_target + 2]) - f64(template.data[idx_temp + 2]))
 
-					sum += weight * (diff_r * diff_r + diff_g * diff_g + diff_b * diff_b)
+					sum += weight * (diff_r + diff_g + diff_b)
 					weight_sum += weight * 3.0
 				}
 			}
 
 			if weight_sum > 0.0 {
-				mse := sum / weight_sum
-				if mse < lowest_mse {
-					lowest_mse = mse
+				mae := sum / weight_sum
+				if mae < lowest_mae {
+					lowest_mae = mae
 					best_x = tx
 					best_y = ty
 				}
 			}
 		}
 	}
-	return lowest_mse, best_x, best_y
+	return lowest_mae, best_x, best_y
 }
 
 fn get_char_bitmap(c rune) []u8 {
 	return match c {
-		`a`, `A` { [u8(0x0e), 0x11, 0x1f, 0x11, 0x11] }
-		`b`, `B` { [u8(0x1c), 0x12, 0x1c, 0x12, 0x1c] }
-		`c`, `C` { [u8(0x0f), 0x10, 0x10, 0x10, 0x0f] }
-		`d`, `D` { [u8(0x1e), 0x11, 0x11, 0x11, 0x1e] }
-		`e`, `E` { [u8(0x1f), 0x10, 0x1f, 0x10, 0x1f] }
-		`f`, `F` { [u8(0x1f), 0x10, 0x1e, 0x10, 0x10] }
-		`g`, `G` { [u8(0x0f), 0x10, 0x17, 0x11, 0x0f] }
-		`h`, `H` { [u8(0x11), 0x11, 0x1f, 0x11, 0x11] }
-		`i`, `I` { [u8(0x0e), 0x04, 0x04, 0x04, 0x0e] }
-		`j`, `J` { [u8(0x07), 0x02, 0x02, 0x12, 0x0c] }
-		`k`, `K` { [u8(0x11), 0x12, 0x1c, 0x12, 0x11] }
-		`l`, `L` { [u8(0x10), 0x10, 0x10, 0x10, 0x1f] }
-		`m`, `M` { [u8(0x11), 0x1b, 0x15, 0x11, 0x11] }
-		`n`, `N` { [u8(0x11), 0x13, 0x15, 0x19, 0x11] }
-		`o`, `O` { [u8(0x0e), 0x11, 0x11, 0x11, 0x0e] }
-		`p`, `P` { [u8(0x1e), 0x11, 0x1e, 0x10, 0x10] }
-		`q`, `Q` { [u8(0x0e), 0x11, 0x11, 0x0d, 0x0e] }
-		`r`, `R` { [u8(0x1e), 0x11, 0x1e, 0x14, 0x12] }
-		`s`, `S` { [u8(0x0f), 0x10, 0x0e, 0x01, 0x1e] }
-		`t`, `T` { [u8(0x1f), 0x04, 0x04, 0x04, 0x04] }
-		`u`, `U` { [u8(0x11), 0x11, 0x11, 0x11, 0x0e] }
-		`v`, `V` { [u8(0x11), 0x11, 0x11, 0x0a, 0x04] }
-		`w`, `W` { [u8(0x11), 0x11, 0x15, 0x15, 0x0a] }
-		`x`, `X` { [u8(0x11), 0x0a, 0x04, 0x0a, 0x11] }
-		`y`, `Y` { [u8(0x11), 0x11, 0x0a, 0x04, 0x04] }
-		`z`, `Z` { [u8(0x1f), 0x02, 0x04, 0x08, 0x1f] }
+		`a` { [u8(0x0c), 0x12, 0x1e, 0x12, 0x12] }
+		`b` { [u8(0x1c), 0x12, 0x1c, 0x12, 0x1c] }
+		`c` { [u8(0x0e), 0x10, 0x10, 0x10, 0x0e] }
+		`d` { [u8(0x1c), 0x12, 0x12, 0x12, 0x1c] }
+		`e` { [u8(0x1e), 0x10, 0x1c, 0x10, 0x1e] }
+		`f` { [u8(0x1e), 0x10, 0x1c, 0x10, 0x10] }
+		`g` { [u8(0x0e), 0x10, 0x16, 0x12, 0x0e] }
+		`h` { [u8(0x12), 0x12, 0x1e, 0x12, 0x12] }
+		`i` { [u8(0x0e), 0x04, 0x04, 0x04, 0x0e] }
+		`j` { [u8(0x0e), 0x02, 0x02, 0x12, 0x0c] }
+		`k` { [u8(0x12), 0x14, 0x18, 0x14, 0x12] }
+		`l` { [u8(0x10), 0x10, 0x10, 0x10, 0x1e] }
+		`m` { [u8(0x11), 0x1b, 0x15, 0x11, 0x11] }
+		`n` { [u8(0x12), 0x16, 0x1a, 0x12, 0x12] }
+		`o` { [u8(0x0c), 0x12, 0x12, 0x12, 0x0c] }
+		`p` { [u8(0x1c), 0x12, 0x1c, 0x10, 0x10] }
+		`q` { [u8(0x0c), 0x12, 0x12, 0x14, 0x0a] }
+		`r` { [u8(0x1c), 0x12, 0x1c, 0x14, 0x12] }
+		`s` { [u8(0x0e), 0x10, 0x0c, 0x02, 0x1c] }
+		`t` { [u8(0x1f), 0x04, 0x04, 0x04, 0x04] }
+		`u` { [u8(0x12), 0x12, 0x12, 0x12, 0x0c] }
+		`v` { [u8(0x12), 0x12, 0x12, 0x0a, 0x04] }
+		`w` { [u8(0x11), 0x11, 0x15, 0x15, 0x0a] }
+		`x` { [u8(0x12), 0x12, 0x0c, 0x12, 0x12] }
+		`y` { [u8(0x12), 0x12, 0x0c, 0x04, 0x04] }
+		`z` { [u8(0x1f), 0x02, 0x04, 0x08, 0x1f] }
+		`0` { [u8(0x0e), 0x12, 0x12, 0x12, 0x0e] }
 		`1` { [u8(0x04), 0x0c, 0x04, 0x04, 0x0e] }
-		`2` { [u8(0x0e), 0x11, 0x02, 0x04, 0x1f] }
-		`3` { [u8(0x1f), 0x02, 0x0e, 0x02, 0x1f] }
-		`4` { [u8(0x12), 0x12, 0x1f, 0x02, 0x02] }
-		`5` { [u8(0x1f), 0x10, 0x1e, 0x01, 0x1e] }
-		`6` { [u8(0x1e), 0x10, 0x1e, 0x11, 0x1e] }
-		`7` { [u8(0x1f), 0x02, 0x04, 0x08, 0x10] }
-		`8` { [u8(0x0e), 0x11, 0x0e, 0x11, 0x0e] }
-		`9` { [u8(0x0e), 0x11, 0x0f, 0x01, 0x0e] }
-		`0` { [u8(0x0e), 0x11, 0x11, 0x11, 0x0e] }
-		else { [u8(0x1f), 0x15, 0x15, 0x15, 0x1f] }
+		`2` { [u8(0x0e), 0x02, 0x06, 0x08, 0x0f] }
+		`3` { [u8(0x0e), 0x02, 0x06, 0x02, 0x0e] }
+		`4` { [u8(0x12), 0x12, 0x1e, 0x02, 0x02] }
+		`5` { [u8(0x1f), 0x10, 0x1e, 0x02, 0x1c] }
+		`6` { [u8(0x0c), 0x10, 0x1c, 0x12, 0x0c] }
+		`7` { [u8(0x1f), 0x02, 0x04, 0x08, 0x08] }
+		`8` { [u8(0x0c), 0x12, 0x0c, 0x12, 0x0c] }
+		`9` { [u8(0x0c), 0x12, 0x0e, 0x02, 0x0c] }
+		else { [u8(0x00), 0x00, 0x00, 0x00, 0x00] }
 	}
 }
 
