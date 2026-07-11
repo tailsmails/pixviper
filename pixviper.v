@@ -238,6 +238,7 @@ fn decode_sequential(target RawImage, mode string, intensity int, alphabet strin
 		println('Decoding position ${step + 1}/${target_length}...')
 		mut best_char := ` `
 		mut lowest_error := math.max_f64
+		mut errors := []f64{}
 
 		for r in runes {
 			candidate := decoded + r.str()
@@ -258,13 +259,32 @@ fn decode_sequential(target RawImage, mode string, intensity int, alphabet strin
 			processed := degradation_algo(rendered, intensity)
 			
 			error := calculate_mse_at_pos(target, processed, 0, 0, empty_bg)
+			errors << error
 
 			if error < lowest_error {
 				lowest_error = error
 				best_char = r
 			}
 		}
-		decoded += best_char.str()
+
+		mut is_obscured := true
+		if errors.len > 1 {
+			first_error := errors[0]
+			for err in errors {
+				if math.abs(err - first_error) > 1e-6 {
+					is_obscured = false
+					break
+				}
+			}
+		} else {
+			is_obscured = false
+		}
+
+		if is_obscured {
+			decoded += '?'
+		} else {
+			decoded += best_char.str()
+		}
 		println('Progress: ${decoded}')
 
 		if generate_gif {
