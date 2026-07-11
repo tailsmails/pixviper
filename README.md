@@ -33,10 +33,11 @@ Here is a visual demonstration of Pixviper's trial-and-error search process:
 
 ## Key Architectural Features
 
-* **Parallel Candidate Evaluation**: Concurrently spawns OS-level threads to evaluate dictionary candidates using a sliding-window Mean Squared Error (MSE) metric.
+* **Parallel Candidate Evaluation**: Concurrently spawns OS-level threads to evaluate dictionary candidates using a sliding-window Mean Absolute Error (MAE) metric.
 * **Greedy Character-by-Character Search**: Builds unknown strings sequentially without a dictionary.
 * **Grid-Aligned Full-Canvas Simulation**: Eliminates boundary block contamination. Sequential candidates are rendered on target-sized canvases to preserve global pixelation block coordinates.
-* **Scribble Mask Support**: Accepts alpha masks to exclude specific coordinates (e.g., pen scribbles or black bars) from the MSE calculations.
+* **Right-to-Left (RTL) Script Support**: Supports Arabic and any RTL language text recovery by leveraging ImageMagick's bidirectional formatting, correct text direction flags, and anchor alignments.
+* **Scribble Mask Support**: Accepts alpha masks to exclude specific coordinates (e.g., pen scribbles or black bars) from the error calculations.
 * **Integrated GIF Pipeline**: Automates the compilation of search frames into a lightweight animated GIF utilizing ImageMagick.
 
 ---
@@ -97,6 +98,29 @@ Full-Size Candidate [A _ _] (Globally Pixelated):
 | `--mask` | `-k` | *(empty)* | Path to alpha mask to ignore occlusions |
 | `--seq` | `-q` | `true` | Sequential search (Set to `false` for Dictionary Mode) |
 | `--gif` | *(none)*| `false` | Generates a visualization GIF of the trials |
+| `--rtl` | `-r` | `false` | Enable Right-to-Left (RTL) mode for Persian / Arabic / Urdu / Pashto / Kurdish (Sorani) / Balochi / Luri / Sindhi / Uyghur / Kashmiri / Punjabi (Shahmukhi) / Azerbaijani / Turkmen / Gilaki / Mazanderani / Hebrew / Yiddish / Ladino / Dhivehi / Aramaic / Syriac / Mandaic / Samaritan / Rohingya / Fulani / Bambara / Mende / Phoenician / Avestan / Pahlavi / Sogdian / Old Turkic text rendering |
+
+---
+
+## Usage Examples
+
+### Example 1: Standard English Recovery (Sequential Mode)
+To recover an English pixelated string of length 4:
+```sh
+pixviper --image target.png --mode pixelate --intensity 4 --font ./fonts/Roboto-Regular.ttf --alphabet "abcdefghijklmnopqrstuvwxyz" --length 4 --gif
+```
+
+### Example 2: Arabic/Persian RTL Recovery (Sequential Mode)
+To recover a right-to-left script like Arabic, it is important to provide an Arabic-compatible `.ttf` font (e.g., Amiri, Scheherazade, or Tahoma) and enable the `--rtl` flag.
+
+Suppose you have a pixelated target image of the Arabic word **"مرحبا"** (length 5) with pixelation block size 4:
+```sh
+pixviper --image arabic_redacted.png --mode pixelate --intensity 4 --font ./fonts/Amiri-Regular.ttf --rtl --alphabet "امربح" --length 5 --gif
+```
+**Why this works:**
+* `--font ./fonts/Amiri-Regular.ttf` supplies the glyph shapes required for cursive Arabic script.
+* `--rtl` (or `-r`) forces the renderer to align text to the right boundary using `-gravity East` and sets the `-direction right-to-left` layout direction in ImageMagick [1].
+* `--alphabet "امربح"` restricts the search space to candidate letters present in the word to optimize search execution.
 
 ---
 
@@ -108,7 +132,13 @@ To verify the parallel matching engine, masked search, and sequential de-pixelat
 pixviper test
 ```
 
-This runs 7 rigorous tests covering:
+By default, the 8th test case (using custom fonts) runs an English LTR test. If you want to verify the **Arabic RTL** implementation with your custom font, run the test command with the `-rtl` flag and the path to your Arabic font file:
+
+```sh
+pixviper test ./fonts/Amiri-Regular.ttf -rtl
+```
+
+This runs 8 rigorous tests covering:
 1. Brute-Force Pixelation Matching
 2. Blurred Text Reconstruction
 3. Alphabet Combinations Generation
@@ -116,6 +146,7 @@ This runs 7 rigorous tests covering:
 5. Sequential Pixelation Decoding (Letter-by-Letter)
 6. Sequential Blur Decoding (Letter-by-Letter)
 7. Custom Numeric Sequential Recovery
+8. Custom Font Sequential Recovery (Tests **Arabic RTL** if `-rtl` and a font are provided, otherwise falls back to English LTR)
 
 These tests generate visual PNG and animated GIF assets (`test_case_*.gif`) in your current working directory.
 
