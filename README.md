@@ -119,7 +119,7 @@ pixviper --image arabic_redacted.png --mode pixelate --intensity 4 --font ./font
 ```
 **Why this works:**
 * `--font ./fonts/Amiri-Regular.ttf` supplies the glyph shapes required for cursive Arabic script.
-* `--rtl` (or `-r`) forces the renderer to align text to the right boundary using `-gravity East` and sets the `-direction right-to-left` layout direction in ImageMagick [1].
+* `--rtl` (or `-r`) forces the renderer to align text to the right boundary using `-gravity East` and sets the `-direction right-to-left` layout direction in ImageMagick.
 * `--alphabet "امربح"` restricts the search space to candidate letters present in the word to optimize search execution.
 
 ---
