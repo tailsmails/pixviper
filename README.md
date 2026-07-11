@@ -46,7 +46,7 @@ Here is a visual demonstration of Pixviper's trial-and-error search process:
 To update your system, install dependencies (`git`, `clang`, `make`, `imagemagick`), pull the V language compiler (if not present), clone Pixviper, compile with release optimizations, and link to your local binary path, run the following command:
 
 ```sh
-apt update -y && apt install -y git clang make imagemagick && if ! command -v v >/dev/null 2>&1; then git clone --depth=1 https://github.com/vlang/v && cd v && make && ./v symlink && cd ..; fi && git clone --depth=1 https://github.com/tailsmails/pixviper && cd pixviper && v -prod pixviper.v -o pixviper && ln -sf $(pwd)/pixviper $PREFIX/bin/vget
+apt update -y && apt install -y git clang make imagemagick && if ! command -v v >/dev/null 2>&1; then git clone --depth=1 https://github.com/vlang/v && cd v && make && ./v symlink && cd ..; fi && git clone --depth=1 https://github.com/tailsmails/pixviper && cd pixviper && v -prod pixviper.v -o pixviper && ln -sf $(pwd)/pixviper $PREFIX/bin/pixviper
 ```
 
 ---
